@@ -1,0 +1,4 @@
+*.DS_STORE
+*.save
+*.csv
+competition_package/datasets/train.parquet
