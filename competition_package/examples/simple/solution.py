@@ -5,7 +5,13 @@ import numpy as np
 import pandas as pd
 
 import torch
+print("cuda ava", torch.cuda.is_available())
+print("device count:", torch.cuda.device_count())
+print("gpu", torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none")
 import torch.nn as nn
+
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("using device", DEVICE)
 
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -41,6 +47,8 @@ class PredictionModel(nn.Module):
         self.heads = nn.ModuleList([nn.Linear(self.hidden_size, 1) for _ in range(32)])
         self.target_index = 0
 
+        self.to(DEVICE)
+
         self.current_seq_ix = None
         self.sequence_history = []
 
@@ -52,9 +60,10 @@ class PredictionModel(nn.Module):
     def forward(self, x):
         # x shape: (batch_size, seq_len, input_size)
         batch_size = x.size(0)
+        device=x.device
 
-        h0 = torch.zeros(self.num_layers, batch_size, self.hidden_size)
-        c0 = torch.zeros(self.num_layers, batch_size, self.hidden_size)
+        h0 = torch.zeros(self.num_layers, batch_size, self.hidden_size, device=device)
+        c0 = torch.zeros(self.num_layers, batch_size, self.hidden_size,device=device)
 
         out, _ = self.lstm(x, (h0, c0))      # (batch_size, seq_len, hidden_size)
 
@@ -92,7 +101,7 @@ class PredictionModel(nn.Module):
 
         inp = np.concatenate([seq, rm5], axis=1)             # (seq_len, 64)
 
-        x = torch.tensor(inp, dtype=torch.float32).unsqueeze(0)
+        x = torch.tensor(inp, dtype=torch.float32).unsqueeze(0).to(DEVICE)
 
 
         # Run through the model
@@ -125,44 +134,51 @@ def train_model(
     batch_size: int = 64,
 ):
     model.train()
+    model.to(DEVICE)
     X_all = train_array.astype(np.float32)  # (N, 64)
+    y_raw = X_all[:, :32]
     loss_fn = nn.MSELoss()
 
-    # === Autoregressive training: loop over each target feature ===
-    for k in range(32):
-        print(f"\n=== Training head for feature {k} ===")
-        model.target_index = k
+    X, y = make_sequences(X_all, y_raw, seq_len=seq_len)
 
-        y_raw = X_all[:, k:k+1]     # target = only 1 feature
+    X_tensor = torch.tensor(X, dtype=torch.float32)
+    y_tensor = torch.tensor(y, dtype=torch.float32)
 
-        X, y = make_sequences(X_all, y_raw, seq_len=seq_len)
+    dataset = torch.utils.data.TensorDataset(X_tensor, y_tensor)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False, pin_memory=True)
 
-        X_tensor = torch.tensor(X, dtype=torch.float32)
-        y_tensor = torch.tensor(y, dtype=torch.float32)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
-        dataset = torch.utils.data.TensorDataset(X_tensor, y_tensor)
-        loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    for epoch in range(num_epochs):
+        epoch_loss = 0.0
+        for batch_index, (xb, yb) in enumerate(loader):
+            xb = xb.to(DEVICE)
+            yb = yb.to(DEVICE)
 
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+            k = batch_index % 32
+            model.target_index = k
 
-        for epoch in range(num_epochs):
-            epoch_loss = 0.0
-            for xb, yb in loader:
-                optimizer.zero_grad()
-                preds = model(xb)       # (batch, 1)
-                loss = loss_fn(preds, yb)
-                loss.backward()
-                optimizer.step()
-                epoch_loss += loss.item() * xb.size(0)
+            optimizer.zero_grad()
 
-            epoch_loss /= len(dataset)
-            print(f"  [feature {k:02d}] Epoch {epoch+1}/{num_epochs} - loss: {epoch_loss:.6f}")
+            preds = model(xb)       # (batch, 1)
+            preds = preds.view(-1)
+
+            target = yb[:, k]
+
+            loss = loss_fn(preds, target)
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item() * xb.size(0)
+
+        epoch_loss /= len(dataset)
+        print(f"Epoch {epoch+1}/{num_epochs} - loss: {epoch_loss:.6f}")
 
 def tune_hyperparameters(train_array):
     param_grid = {
         "num_epochs": [32, 64],
         "lr": [1e-3, 5e-4],
-        "batch_size": [64, 128],
+        "batch_size": [256, 384, 512],
         "seq_len": [32, 64],
     }
 
