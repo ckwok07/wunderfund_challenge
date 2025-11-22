@@ -160,7 +160,7 @@ if __name__ == "__main__":
 
     # If no weights yet → train and save them
     if not os.path.exists(weights_path):
-        print("No lstm_weights.pt found – training model to generate weights...")
+        print("No lstm_weights.pt found training model to generate weights...")
 
         model = PredictionModel()  # will NOT load weights because file doesn't exist yet
 
