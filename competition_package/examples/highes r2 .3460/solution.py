@@ -23,7 +23,11 @@ class PredictionModel(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.dim = 32
+        self.rm_buffer = []
+        self.rm_sum = None
+
+
+        self.dim = 64
         self.hidden_size = 64
         self.num_layers = 1
 
@@ -68,20 +72,37 @@ class PredictionModel(nn.Module):
         if not dp.need_prediction:
             return None
 
-        # New sequence → reset recurrent state
+        # New sequence → reset recurrent state and rolling buffer
         if self.current_seq_ix != dp.seq_ix:
             self.current_seq_ix = dp.seq_ix
             self.h = torch.zeros(self.num_layers, 1, self.hidden_size, device=DEVICE)
             self.c = torch.zeros(self.num_layers, 1, self.hidden_size, device=DEVICE)
+            self.rm_buffer = []
+            self.rm_sum = None
 
-        # Convert one timestep to tensor (no growing history buffer)
-        x = torch.tensor(dp.state.astype(np.float32)).view(1, 1, self.dim).to(DEVICE)
+        # raw 32-dim state
+        s = dp.state.astype(np.float32)
 
-        # 1-step recurrent update
+        # rolling mean over last 5 timesteps
+        if self.rm_sum is None:
+            self.rm_sum = s.copy()
+            self.rm_buffer = [s]
+            rm = s
+        else:
+            self.rm_sum += s
+            self.rm_buffer.append(s)
+            if len(self.rm_buffer) > 5:
+                self.rm_sum -= self.rm_buffer.pop(0)
+            rm = self.rm_sum / len(self.rm_buffer)
+
+        # input is [raw, rm] = 64 dims
+        inp = np.concatenate([s, rm], axis=0).astype(np.float32)
+        x = torch.from_numpy(inp).view(1, 1, self.dim).to(DEVICE)
+
         out, (self.h, self.c) = self.lstm(x, (self.h, self.c))
         y = self.fc(out[:, -1, :])
-
         return y.cpu().numpy().reshape(-1)
+
 
 
 def make_sequences(data: np.ndarray, seq_len: int = 32):
