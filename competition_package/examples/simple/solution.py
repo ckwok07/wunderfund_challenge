@@ -47,15 +47,15 @@ class PredictionModel(nn.Module):
         self.heads = nn.ModuleList([nn.Linear(self.hidden_size, 1) for _ in range(32)])
         self.target_index = 0
 
-        self.to(DEVICE)
-
         self.current_seq_ix = None
         self.sequence_history = []
 
         weights_path = os.path.join(CURRENT_DIR, "lstm_weights.pt")
         if os.path.exists(weights_path):
-            state_dict = torch.load(weights_path, map_location="cpu")
+            state_dict = torch.load(weights_path, map_location=DEVICE)
             self.load_state_dict(state_dict)
+
+        self.to(DEVICE)
 
     def forward(self, x):
         # x shape: (batch_size, seq_len, input_size)
@@ -105,9 +105,11 @@ class PredictionModel(nn.Module):
 
 
         # Run through the model
+        self.eval()
         y = self.forward(x)  # (1, dim)
+        self.train()
 
-        return y.numpy().reshape(-1)
+        return y.detach().cpu().numpy().reshape(-1)
 
 def make_sequences(X: np.ndarray, y: np.ndarray, seq_len: int = 32):
 
@@ -264,18 +266,12 @@ if __name__ == "__main__":
 
     best_model, best_params = tune_hyperparameters(train_array)
 
-    torch.save(best_model.state_dict(), os.path.join(CURRENT_DIR, "lstm_weights.pt"))
-
-    results = scorer.score(best_model)
-
-
-
     # Save trained weights to file in the same folder as solution.py
     torch.save(model.state_dict(), os.path.join(CURRENT_DIR, "lstm_weights.pt"))
 
 
     # Evaluate our solution
-    results = scorer.score(model)
+    results = scorer.score(best_model)   
 
     print("\nResults:")
     print(f"Mean R² across all features: {results['mean_r2']:.6f}")
