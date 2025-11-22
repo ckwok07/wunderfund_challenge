@@ -7,6 +7,9 @@ import pandas as pd
 import torch
 import torch.nn as nn
 
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print("using device", DEVICE)
+
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Add project root folder to path for importing utils
@@ -43,15 +46,18 @@ class PredictionModel(nn.Module):
 
         weights_path = os.path.join(CURRENT_DIR, "lstm_weights.pt")
         if os.path.exists(weights_path):
-            state_dict = torch.load(weights_path, map_location="cpu")
+            state_dict = torch.load(weights_path, map_location=DEVICE)
             self.load_state_dict(state_dict)
+
+        self.to(DEVICE)
 
     def forward(self, x):
         # x shape: (batch_size, seq_len, input_size)
         batch_size = x.size(0)
+        device = x.device
 
-        h0 = torch.zeros(self.num_layers, batch_size, self.hidden_size)
-        c0 = torch.zeros(self.num_layers, batch_size, self.hidden_size)
+        h0 = torch.zeros(self.num_layers, batch_size, self.hidden_size,device=device)
+        c0 = torch.zeros(self.num_layers, batch_size, self.hidden_size,device = device)
 
         out, _ = self.lstm(x, (h0, c0))      # (batch_size, seq_len, hidden_size)
         out = self.fc(out[:, -1, :])         # (batch_size, dim)
@@ -78,12 +84,12 @@ class PredictionModel(nn.Module):
 
         # Build input tensor of shape (1, seq_len, dim)
         seq = np.stack(self.sequence_history, axis=0)            # (seq_len, dim)
-        x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0)  # (1, seq_len, dim)
+        x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0).to(DEVICE)  # (1, seq_len, dim)
 
         # Run through the model
         y = self.forward(x)  # (1, dim)
 
-        return y.numpy().reshape(-1)
+        return y.detach().cpu().numpy().reshape(-1)
 
 def make_sequences(data: np.ndarray, seq_len: int = 32):
     """
@@ -112,6 +118,7 @@ def train_model(
     Train the model offline on the full dataset *before* scoring.
     """
     model.train()
+    model.to(DEVICE)
 
     X, y = make_sequences(train_array, seq_len=seq_len)
     X_tensor = torch.tensor(X, dtype=torch.float32)
@@ -126,6 +133,8 @@ def train_model(
     for epoch in range(num_epochs):      # <-- num_epochs is used here
         epoch_loss = 0.0
         for xb, yb in loader:
+            xb = xb.to(DEVICE)
+            yb = yb.to(DEVICE)
             optimizer.zero_grad()
             preds = model(xb)
             loss = loss_fn(preds, yb)
