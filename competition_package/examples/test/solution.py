@@ -56,8 +56,6 @@ class PredictionModel(nn.Module):
         out, _ = self.lstm(x, (h0, c0))      # (batch_size, seq_len, hidden_size)
         out = self.fc(out[:, -1, :])         # (batch_size, dim)
         return out
-
-        return out
     
     @torch.no_grad()
     def predict(self, dp: DataPoint):
