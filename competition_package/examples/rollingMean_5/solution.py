@@ -30,7 +30,7 @@ class PredictionModel(nn.Module):
         self.dim = None
         self.input_dim = 64
         self.output_dim = 32
-        self.hidden_size = 256
+        self.hidden_size = 128
         self.num_layers = 2
         self.seq_len = 96
 
@@ -38,7 +38,6 @@ class PredictionModel(nn.Module):
         self.c = None
         self.current_seq_ix = None
 
-        self.current_seq_ix = None
         self.sequence_history = []
 
         # LSTM layer
@@ -125,79 +124,121 @@ def make_sequences(input64: np.ndarray, seq_len: int = 32):
 def train_model(
     model: PredictionModel,
     train_array: np.ndarray,
-    num_epochs: int = 3,
+    num_epochs: int = 8,
     seq_len: int = 32,
     lr: float = 1e-3,
     batch_size: int = 64,
 ):
     """
-    Train the model offline on the full dataset *before* scoring.
+    Train the model offline on the full dataset *before* scoring,
+    using an 80/20 time-based validation split.
     """
-    model.train()
     model.to(DEVICE)
 
-    X, y = make_sequences(train_array, seq_len=seq_len)
-    X_tensor = torch.tensor(X, dtype=torch.float32)
-    y_tensor = torch.tensor(y, dtype=torch.float32)
+    N = train_array.shape[0]
+    split_idx = int(0.8 * N)  # 80% / 20% split
 
-    dataset = torch.utils.data.TensorDataset(X_tensor, y_tensor)
-    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
+    # --- time-based split: first 80% train, last 20% validation ---
+    train_part = train_array[:split_idx]
+    # for val, include some context before split so sequences have enough history
+    val_part = train_array[split_idx - seq_len :]  
+
+    # build sequences
+    X_train, y_train = make_sequences(train_part, seq_len=seq_len)
+    X_val, y_val = make_sequences(val_part, seq_len=seq_len)
+
+    X_train_tensor = torch.tensor(X_train, dtype=torch.float32)
+    y_train_tensor = torch.tensor(y_train, dtype=torch.float32)
+    X_val_tensor = torch.tensor(X_val, dtype=torch.float32)
+    y_val_tensor = torch.tensor(y_val, dtype=torch.float32)
+
+    train_dataset = torch.utils.data.TensorDataset(X_train_tensor, y_train_tensor)
+    val_dataset = torch.utils.data.TensorDataset(X_val_tensor, y_val_tensor)
+
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
+    val_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     loss_fn = nn.MSELoss()
 
-    for epoch in range(num_epochs):      # <-- num_epochs is used here
-        epoch_loss = 0.0
-        for xb, yb in loader:
+    for epoch in range(num_epochs):
+        # ---- train ----
+        model.train()
+        train_loss = 0.0
+        for xb, yb in train_loader:
             xb = xb.to(DEVICE)
             yb = yb.to(DEVICE)
+
             optimizer.zero_grad()
             preds = model(xb)
             loss = loss_fn(preds, yb)
             loss.backward()
             optimizer.step()
-            epoch_loss += loss.item() * xb.size(0)
 
-        epoch_loss /= len(dataset)
-        print(f"Epoch {epoch+1}/{num_epochs} - loss: {epoch_loss:.6f}")
+            train_loss += loss.item() * xb.size(0)
+        train_loss /= len(train_dataset)
+
+        # ---- validation ----
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            for xb, yb in val_loader:
+                xb = xb.to(DEVICE)
+                yb = yb.to(DEVICE)
+                preds = model(xb)
+                loss = loss_fn(preds, yb)
+                val_loss += loss.item() * xb.size(0)
+        val_loss /= len(val_dataset)
+
+        print(f"Epoch {epoch+1}/{num_epochs} - train_loss: {train_loss:.6f} | val_loss: {val_loss:.6f}")
+
 
 
 
 if __name__ == "__main__":
-    # Check existence of test file
+    # Path to weights file
+    weights_path = os.path.join(CURRENT_DIR, "lstm_weights.pt")
+
+    # Check existence of train file
     test_file = f"{CURRENT_DIR}/../../datasets/train.parquet"
 
     # Load data into scorer
     scorer = ScorerStepByStep(test_file)
 
-    # Create and test our model
-    model = PredictionModel()
+    # If no weights yet → train and save them
+    if not os.path.exists(weights_path):
+        print("No lstm_weights.pt found – training model to generate weights...")
 
-    print("Testing simple model with moving average...")
-    print(f"Feature dimensionality: {scorer.dim}")
-    print(f"Number of rows in dataset: {len(scorer.dataset)}")
+        model = PredictionModel()  # will NOT load weights because file doesn't exist yet
 
-    df = scorer.dataset.copy()
+        print(f"Feature dimensionality: {scorer.dim}")
+        print(f"Number of rows in dataset: {len(scorer.dataset)}")
 
-    raw = df.iloc[:, 3:35] #raw variables
-    rm5 = raw.rolling(window=5, min_periods=1).mean()
+        df = scorer.dataset.copy()
 
-    train_array = np.concatenate([raw.values, rm5.values], axis=1).astype(np.float32)
+        raw = df.iloc[:, 3:35]  # raw variables
+        rm5 = raw.rolling(window=5, min_periods=1).mean()
 
-    train_model(
-        model,
-        train_array=train_array,
-        num_epochs=18,
-        lr=1.5e-3,
-        batch_size=64,
-        seq_len=96
-    )
+        train_array = np.concatenate([raw.values, rm5.values], axis=1).astype(np.float32)
 
-    # Save trained weights to file in the same folder as solution.py
-    torch.save(model.state_dict(), os.path.join(CURRENT_DIR, "lstm_weights.pt"))
+        train_model(
+            model,
+            train_array=train_array,
+            num_epochs=8,
+            lr=1.5e-3,
+            batch_size=64,
+            seq_len=64
+        )
 
+        # Save trained weights
+        torch.save(model.state_dict(), weights_path)
+        print("Training complete. Saved weights to lstm_weights.pt")
 
-    # Evaluate our solution
+    else:
+        print("Found existing lstm_weights.pt – skipping training.")
+
+    # Now load model with weights and score
+    model = PredictionModel()  # this time it WILL load lstm_weights.pt
     results = scorer.score(model)
 
     print("\nResults:")
@@ -210,8 +251,7 @@ if __name__ == "__main__":
     print(f"\nTotal features: {len(scorer.features)}")
 
     print("\n" + "=" * 60)
-    print("Try submitting an archive with solution.py file")
-    print("to test the solution submission mechanism!")
+    print("Done scoring with LSTM model.")
     print("=" * 60)
 
 
