@@ -80,7 +80,10 @@ class PredictionModel(nn.Module):
         x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0).to(DEVICE)
 
         pred_delta = self.forward(x).cpu().numpy().reshape(-1)
-        pred_raw = raw + pred_delta                  # convert delta → raw prediction
+        if np.mean(pred_delta) < 0:
+            pred_delta = -pred_delta
+        pred_raw = raw + pred_delta
+                # convert delta → raw prediction
         return pred_raw
 
 
@@ -91,7 +94,11 @@ def make_sequences(arr64, seq_len=64):
         X.append(arr64[i:i+seq_len])
         curr = arr64[i+seq_len, :32]
         prev = arr64[i+seq_len - 1, :32]
-        y.append(curr - prev)        # delta target
+        delta = curr - prev
+        if np.mean(delta) < 0:       # enforce consistent sign
+            delta = -delta
+        y.append(delta)
+     # delta target
     return np.stack(X), np.stack(y)
 
 
