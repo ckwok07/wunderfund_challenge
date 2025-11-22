@@ -28,6 +28,7 @@ class PredictionModel(nn.Module):
 
 
         self.dim = 64
+        self.output_dim = 32
         self.hidden_size = 64
         self.num_layers = 1
 
@@ -43,7 +44,7 @@ class PredictionModel(nn.Module):
         )
 
         # Fully-connected layer that maps hidden state → prediction
-        self.fc = nn.Linear(self.hidden_size, self.dim)
+        self.fc = nn.Linear(self.hidden_size, self.output_dim)
 
         self.current_seq_ix = None
         self.sequence_history = []
