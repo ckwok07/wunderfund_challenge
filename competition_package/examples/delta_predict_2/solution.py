@@ -12,6 +12,7 @@ sys.path.append(f"{CURRENT_DIR}/../..")
 from utils import DataPoint, ScorerStepByStep
 
 
+# ========== MODEL ==========
 class PredictionModel(nn.Module):
     def __init__(self):
         super().__init__()
@@ -43,16 +44,11 @@ class PredictionModel(nn.Module):
 
     def forward(self, x):
         out, _ = self.lstm(x)
-        return self.fc(out[:, -1])  # output delta only
-
+        return self.fc(out[:, -1])  # delta only
 
     @torch.no_grad()
     def predict(self, dp: DataPoint):
-        """
-        Scoring:
-        dp.state is raw32 → build 64-dim (raw + rolling mean)
-        model outputs DELTA, but scorer expects RAW → return raw + delta
-        """
+        """dp.state (raw32) → build 64-dim → model predicts delta → return raw + delta"""
         raw = dp.state.astype(np.float32)
 
         if self.current_seq_ix != dp.seq_ix:
@@ -76,36 +72,30 @@ class PredictionModel(nn.Module):
         if not dp.need_prediction:
             return None
 
-        seq = np.stack(self.buf, axis=0)[-64:]
+        seq = np.stack(self.buf, axis=0)
         x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0).to(DEVICE)
 
-        pred_delta = self.forward(x).cpu().numpy().reshape(-1)
-        if np.mean(pred_delta) < 0:
-            pred_delta = -pred_delta
-        pred_raw = raw + pred_delta
-                # convert delta → raw prediction
-        return pred_raw
+        delta = self.forward(x).cpu().numpy().reshape(-1)
+        return raw + delta  # scorer expects raw value, not delta
 
 
-# ---------- Training ----------
+# ========== TRAINING HELPERS ==========
 def make_sequences(arr64, seq_len=64):
+    """Input 64-dim seq → delta target (no sign flipping, no leakage)"""
     X, y = [], []
     for i in range(len(arr64) - seq_len):
-        X.append(arr64[i:i+seq_len])
-        curr = arr64[i+seq_len, :32]
-        prev = arr64[i+seq_len - 1, :32]
+        curr = arr64[i + seq_len, :32]
+        prev = arr64[i + seq_len - 1, :32]
         delta = curr - prev
-        if np.mean(delta) < 0:       # enforce consistent sign
-            delta = -delta
+        X.append(arr64[i:i + seq_len])
         y.append(delta)
-     # delta target
     return np.stack(X), np.stack(y)
 
 
 def amp_loss(pred, target, alpha=0.06):
-    """MSE + amplitude-preserving variance penalty"""
+    """MSE + amplitude variance penalty (no leakage, per batch)"""
     mse = torch.mean((pred - target) ** 2)
-    var_pen = torch.mean((pred.std(0) - target.std(0)) ** 2)
+    var_pen = torch.mean((pred.std(dim=0) - target.std(dim=0)) ** 2)
     return mse + alpha * var_pen
 
 
@@ -135,14 +125,15 @@ def train_model(model, df, epochs=10, lr=1.4e-3, batch_size=96):
             loss.backward()
             opt.step()
             total += loss.item() * xb.size(0)
-        print(f"Epoch {epoch+1}/{epochs}  loss={total / len(loader.dataset):.6f}")
+        print(f"Epoch {epoch+1}/{epochs} loss={total / len(loader.dataset):.6f}")
 
 
-# ---------- Main executable ----------
+# ========== MAIN ==========
 if __name__ == "__main__":
     weights_path = os.path.join(CURRENT_DIR, "lstm_weights.pt")
     scorer = ScorerStepByStep(f"{CURRENT_DIR}/../../datasets/train.parquet")
 
+    # train only once
     if not os.path.exists(weights_path):
         print("No weights found — training...")
         model = PredictionModel()
@@ -152,6 +143,7 @@ if __name__ == "__main__":
     else:
         print("Weights found — skipping training.\n")
 
+    # scoring
     model = PredictionModel()
     results = scorer.score(model)
 
