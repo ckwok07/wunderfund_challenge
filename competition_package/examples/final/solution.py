@@ -23,23 +23,19 @@ class PredictionModel(nn.Module):
     def __init__(self):
         super().__init__()
 
-
-        self.rm_buffer = []
-        self.rm_sum = None
-
         self.dim = None
         self.input_dim = 64
         self.output_dim = 32
         self.hidden_size = 256
         self.num_layers = 2
-        self.seq_len = 96
-
-        self.h = None
-        self.c = None
-        self.current_seq_ix = None
 
         self.current_seq_ix = None
         self.sequence_history = []
+
+        self.h = None
+        self.c = None
+        self.rm_sum = None
+        self.rm_buffer = []
 
         # LSTM layer
         self.lstm = nn.LSTM(
@@ -77,7 +73,7 @@ class PredictionModel(nn.Module):
         if not dp.need_prediction:
             return None
 
-        # reset for new sequence
+        # reset when new sequence begins
         if self.current_seq_ix != dp.seq_ix:
             self.current_seq_ix = dp.seq_ix
             self.h = torch.zeros(self.num_layers, 1, self.hidden_size, device=DEVICE)
@@ -85,8 +81,9 @@ class PredictionModel(nn.Module):
             self.rm_buffer = []
             self.rm_sum = None
 
-        # rolling mean of last 5
         s = dp.state.astype(np.float32)
+
+        # fast rolling mean of last 5 rows
         if self.rm_sum is None:
             self.rm_sum = s.copy()
             self.rm_buffer = [s]
@@ -98,15 +95,15 @@ class PredictionModel(nn.Module):
                 self.rm_sum -= self.rm_buffer.pop(0)
             rm = self.rm_sum / len(self.rm_buffer)
 
-        # single-step model input (64 dims)
+        # construct input (64 dims = raw + rm)
         inp = np.concatenate([s, rm], axis=0).astype(np.float32)
         x = torch.from_numpy(inp).view(1, 1, -1).to(DEVICE)
 
-        # stateful recurrent update
+        # one-step recurrent LSTM
         out, (self.h, self.c) = self.lstm(x, (self.h, self.c))
         y = self.fc(out[:, -1, :])
-        return y.cpu().numpy().reshape(-1)
 
+        return y.cpu().numpy().reshape(-1)
 
 
 def make_sequences(input64: np.ndarray, seq_len: int = 32):
@@ -214,4 +211,4 @@ if __name__ == "__main__":
     print("to test the solution submission mechanism!")
     print("=" * 60)
 
-
+    
