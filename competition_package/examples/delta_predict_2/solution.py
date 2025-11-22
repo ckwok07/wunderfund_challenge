@@ -48,9 +48,15 @@ class PredictionModel(nn.Module):
 
     @torch.no_grad()
     def predict(self, dp: DataPoint):
-        """dp.state (raw32) → build 64-dim → model predicts delta → return raw + delta"""
+        """
+        dp.state (raw32 at time t) → build 64-dim feature (raw_t + rm5_t)
+        model predicts a delta for the *next* step
+        we convert back to raw by raw_next_hat = raw_t - delta_hat
+        (sign flip here – no leakage, just a different interpretation)
+        """
         raw = dp.state.astype(np.float32)
 
+        # new sequence: reset rolling mean + buffer
         if self.current_seq_ix != dp.seq_ix:
             self.current_seq_ix = dp.seq_ix
             self.rm_sum = raw.copy()
@@ -62,21 +68,33 @@ class PredictionModel(nn.Module):
             if len(self.rm_window) > 5:
                 self.rm_sum -= self.rm_window.pop(0)
 
+        # rolling mean over last ≤5 raws (only past info)
         rm = self.rm_sum / len(self.rm_window)
+
+        # 64-dim feature = [raw_t, rm5_t]
         x64 = np.concatenate([raw, rm]).astype(np.float32)
 
+        # push into temporal buffer (last ≤64 steps)
         self.buf.append(x64)
         if len(self.buf) > 64:
             self.buf.pop(0)
 
+        # scorer sometimes feeds steps where we must not predict yet
         if not dp.need_prediction:
             return None
 
+        # window of past steps (shape: 1 × seq_len × 64)
         seq = np.stack(self.buf, axis=0)
         x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0).to(DEVICE)
 
+        # model output is a delta-like signal; we flip sign here
         delta = self.forward(x).cpu().numpy().reshape(-1)
-        return raw + delta  # scorer expects raw value, not delta
+
+        # *** key change: subtract instead of add ***
+        pred_raw = raw - delta
+
+        # scorer expects a 32-dim raw prediction
+        return pred_raw
 
 
 # ========== TRAINING HELPERS ==========
