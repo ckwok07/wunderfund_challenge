@@ -23,7 +23,6 @@ class PredictionModel(nn.Module):
         self.hidden_size = 64
         self.num_layers = 1
 
-        # LSTM accepts 64-dim during training + scoring
         self.lstm = nn.LSTM(
             input_size=self.input_dim,
             hidden_size=self.hidden_size,
@@ -43,7 +42,6 @@ class PredictionModel(nn.Module):
 
         self.to(DEVICE)
 
-    # forward for training + scoring (expects seq64)
     def forward(self, x):
         out, _ = self.lstm(x)
         return self.fc(out[:, -1])
@@ -51,16 +49,13 @@ class PredictionModel(nn.Module):
 
     @torch.no_grad()
     def predict(self, dp: DataPoint):
-        """Scoring: dp.state is 32-dim → build 64-dim (raw + rm5) → predict"""
         raw = dp.state.astype(np.float32)
 
-        # new sequence
         if self.current_seq_ix != dp.seq_ix:
             self.current_seq_ix = dp.seq_ix
             self.rm_sum = raw.copy()
             self.rm_window = [raw]
             self.buf = []
-
         else:
             self.rm_sum += raw
             self.rm_window.append(raw)
@@ -71,13 +66,12 @@ class PredictionModel(nn.Module):
         x64 = np.concatenate([raw, rm]).astype(np.float32)
         self.buf.append(x64)
 
-        # store sequence history
         if len(self.buf) > 64:
             self.buf.pop(0)
         if not dp.need_prediction:
             return None
 
-        seq = np.stack(self.buf, axis=0)[-64:]  # last 64 timesteps
+        seq = np.stack(self.buf, axis=0)[-64:]
         x = torch.tensor(seq, dtype=torch.float32).unsqueeze(0).to(DEVICE)
         y = self.forward(x)
         return y.cpu().numpy().reshape(-1)
@@ -87,8 +81,17 @@ def make_sequences(data, seq_len=64):
     X, y = [], []
     for i in range(len(data) - seq_len):
         X.append(data[i:i+seq_len])
-        y.append(data[i+seq_len, :32])   # next raw32
+        y.append(data[i+seq_len, :32])
     return np.stack(X), np.stack(y)
+
+
+# ⬇⬇ CUSTOM LOSS FIXES AMPLITUDE WITHOUT SLOWING SCORING ⬇⬇
+def amp_loss(pred, target, alpha=0.12):
+    mse = torch.mean((pred - target) ** 2)
+    pred_std = pred.std(dim=0)
+    targ_std = target.std(dim=0)
+    var_pen = torch.mean((pred_std - targ_std) ** 2)
+    return mse + alpha * var_pen
 
 
 def train_model(model, df, num_epochs=10, lr=1.4e-3, batch_size=96):
@@ -103,17 +106,17 @@ def train_model(model, df, num_epochs=10, lr=1.4e-3, batch_size=96):
     loader = torch.utils.data.DataLoader(
         torch.utils.data.TensorDataset(X, y),
         batch_size=batch_size,
-        shuffle=False)
+        shuffle=False
+    )
 
     opt = torch.optim.Adam(model.parameters(), lr=lr)
-    loss_fn = nn.MSELoss()
 
     for epoch in range(num_epochs):
         total = 0
         for xb, yb in loader:
             xb, yb = xb.to(DEVICE), yb.to(DEVICE)
             opt.zero_grad()
-            loss = loss_fn(model(xb), yb)
+            loss = amp_loss(model(xb), yb)   # ⬅ amplitude-preserving loss
             loss.backward()
             opt.step()
             total += loss.item() * xb.size(0)
@@ -124,18 +127,15 @@ if __name__ == "__main__":
     weights_path = os.path.join(CURRENT_DIR, "lstm_weights.pt")
     scorer = ScorerStepByStep(f"{CURRENT_DIR}/../../datasets/train.parquet")
 
-    # Train only once
     if not os.path.exists(weights_path):
         print("No weights found → training...")
         model = PredictionModel()
         train_model(model, scorer.dataset)
         torch.save(model.state_dict(), weights_path)
         print("Weights saved → lstm_weights.pt\n")
-
     else:
         print("Weights found → skipping training.\n")
 
-    # Score
     model = PredictionModel()
     results = scorer.score(model)
 
