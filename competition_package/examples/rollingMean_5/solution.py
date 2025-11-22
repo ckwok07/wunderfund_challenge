@@ -73,30 +73,41 @@ class PredictionModel(nn.Module):
         if self.dim is None:
             self.dim = dp.state.shape[0]
 
-        # Reset history when a new sequence starts
+        # Reset internal buffers for a new sequence
         if self.current_seq_ix != dp.seq_ix:
             self.current_seq_ix = dp.seq_ix
             self.sequence_history = []
+            self.rm_buffer = []         # store last 5 rows
+            self.rm_sum = None          # running sum for fast RM5
 
-        # Add the current timestep to history
-        self.sequence_history.append(dp.state.astype(np.float32))
+        # Convert to float32
+        s = dp.state.astype(np.float32)
+        self.sequence_history.append(s)
 
-        # If scorer doesn't request a prediction yet, return None
-        if not dp.need_prediction:
-            return None
+        # ----- fast rolling mean of last 5 (O(1) runtime) -----
+        if self.rm_sum is None:
+            self.rm_sum = s.copy()
+            self.rm_buffer = [s]
+            rm = s
+        else:
+            self.rm_sum += s
+            self.rm_buffer.append(s)
+            if len(self.rm_buffer) > 5:
+                self.rm_sum -= self.rm_buffer.pop(0)
+            rm = self.rm_sum / len(self.rm_buffer)
 
-        # Build input tensor of shape (1, seq_len, dim)
-        seq = np.stack(self.sequence_history, axis=0)            # (seq_len, dim)
-        rm5 = pd.DataFrame(seq).rolling(window=5, min_periods=1).mean().to_numpy()
-        inp = np.concatenate([seq, rm5], axis=1)         # (seq_len, 64)
-        x = torch.tensor(inp, dtype=torch.float32).unsqueeze(0).to(DEVICE)
-        
+        # Build input window (last seq_len timesteps)
+        seq_np = np.array(self.sequence_history[-self.seq_len:], dtype=np.float32)
 
+        # Expand rm to match window shape
+        rm_stack = np.tile(rm, (seq_np.shape[0], 1)).astype(np.float32)
 
-        # Run through the model
-        y = self.forward(x)  # (1, dim)
+        inp = np.concatenate([seq_np, rm_stack], axis=1)   # (T, 64)
+        x = torch.from_numpy(inp).unsqueeze(0).to(DEVICE)  # (1, T, 64)
 
+        y = self.forward(x)
         return y.detach().cpu().numpy().reshape(-1)
+
 
 def make_sequences(input64: np.ndarray, seq_len: int = 32):
 
@@ -111,45 +122,44 @@ def make_sequences(input64: np.ndarray, seq_len: int = 32):
     return X, y
 
 
-@torch.no_grad()
-def predict(self, dp: DataPoint):
-    if self.dim is None:
-        self.dim = dp.state.shape[0]
+def train_model(
+    model: PredictionModel,
+    train_array: np.ndarray,
+    num_epochs: int = 3,
+    seq_len: int = 32,
+    lr: float = 1e-3,
+    batch_size: int = 64,
+):
+    """
+    Train the model offline on the full dataset *before* scoring.
+    """
+    model.train()
+    model.to(DEVICE)
 
-    # Reset internal buffers for a new sequence
-    if self.current_seq_ix != dp.seq_ix:
-        self.current_seq_ix = dp.seq_ix
-        self.sequence_history = []
-        self.rm_buffer = []         # store last 5 rows
-        self.rm_sum = None          # running sum for fast RM5
+    X, y = make_sequences(train_array, seq_len=seq_len)
+    X_tensor = torch.tensor(X, dtype=torch.float32)
+    y_tensor = torch.tensor(y, dtype=torch.float32)
 
-    # Convert to float32
-    s = dp.state.astype(np.float32)
-    self.sequence_history.append(s)
+    dataset = torch.utils.data.TensorDataset(X_tensor, y_tensor)
+    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
 
-    # ----- fast rolling mean of last 5 (O(1) runtime) -----
-    if self.rm_sum is None:
-        self.rm_sum = s.copy()
-        self.rm_buffer = [s]
-        rm = s
-    else:
-        self.rm_sum += s
-        self.rm_buffer.append(s)
-        if len(self.rm_buffer) > 5:
-            self.rm_sum -= self.rm_buffer.pop(0)
-        rm = self.rm_sum / len(self.rm_buffer)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    loss_fn = nn.MSELoss()
 
-    # Build input window (last seq_len timesteps)
-    seq_np = np.array(self.sequence_history[-self.seq_len:], dtype=np.float32)
+    for epoch in range(num_epochs):      # <-- num_epochs is used here
+        epoch_loss = 0.0
+        for xb, yb in loader:
+            xb = xb.to(DEVICE)
+            yb = yb.to(DEVICE)
+            optimizer.zero_grad()
+            preds = model(xb)
+            loss = loss_fn(preds, yb)
+            loss.backward()
+            optimizer.step()
+            epoch_loss += loss.item() * xb.size(0)
 
-    # Expand rm to match window shape
-    rm_stack = np.tile(rm, (seq_np.shape[0], 1)).astype(np.float32)
-
-    inp = np.concatenate([seq_np, rm_stack], axis=1)   # (T, 64)
-    x = torch.from_numpy(inp).unsqueeze(0).to(DEVICE)  # (1, T, 64)
-
-    y = self.forward(x)
-    return y.detach().cpu().numpy().reshape(-1)
+        epoch_loss /= len(dataset)
+        print(f"Epoch {epoch+1}/{num_epochs} - loss: {epoch_loss:.6f}")
 
 
 
