@@ -59,6 +59,7 @@ class PredictionModel(nn.Module):
             self.current_seq_ix = dp.seq_ix
             self.rm_sum = raw.copy()
             self.rm_window = [raw]
+            self.buf = []
 
         else:
             self.rm_sum += raw
@@ -68,12 +69,11 @@ class PredictionModel(nn.Module):
 
         rm = self.rm_sum / len(self.rm_window)
         x64 = np.concatenate([raw, rm]).astype(np.float32)
-
-        # store sequence history
-        if not hasattr(self, "buf"):
-            self.buf = []
         self.buf.append(x64)
 
+        # store sequence history
+        if len(self.buf) > 64:
+            self.buf.pop(0)
         if not dp.need_prediction:
             return None
 
