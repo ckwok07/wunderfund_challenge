@@ -26,8 +26,8 @@ class PredictionModel(nn.Module):
         self.dim = None
         self.input_dim = 64
         self.output_dim = 32
-        self.hidden_size = 64
-        self.num_layers = 1
+        self.hidden_size = 256
+        self.num_layers = 2
 
         self.current_seq_ix = None
         self.sequence_history = []
@@ -37,6 +37,7 @@ class PredictionModel(nn.Module):
             input_size=self.input_dim,
             hidden_size=self.hidden_size,
             num_layers=self.num_layers,
+            dropout=.20,
             batch_first=True
         )
 
@@ -169,9 +170,10 @@ if __name__ == "__main__":
     train_model(
         model,
         train_array=train_array,
-        num_epochs=12,
-        lr=1e-3,
+        num_epochs=18,
+        lr=1.5e-3,
         batch_size=64,
+        seq_len=96
     )
 
     # Save trained weights to file in the same folder as solution.py
@@ -194,3 +196,5 @@ if __name__ == "__main__":
     print("Try submitting an archive with solution.py file")
     print("to test the solution submission mechanism!")
     print("=" * 60)
+
+    
