@@ -23,7 +23,8 @@ class PredictionModel(nn.Module):
     def __init__(self):
         super().__init__()
 
-        self.dim = 32
+        self.dim = 64
+        self.output_dim = 32
         self.hidden_size = 64
         self.num_layers = 1
 
@@ -39,7 +40,7 @@ class PredictionModel(nn.Module):
         )
 
         # Fully-connected layer that maps hidden state → prediction
-        self.fc = nn.Linear(self.hidden_size, self.dim)
+        self.fc = nn.Linear(self.hidden_size, self.output_dim)
 
         self.current_seq_ix = None
         self.sequence_history = []
@@ -172,7 +173,8 @@ if __name__ == "__main__":
         raw = df.iloc[:, 3:35]  # raw variables
         rm5 = raw.rolling(window=5, min_periods=1).mean()
 
-        train_array = np.concatenate([raw.values, rm5.values], axis=1).astype(np.float32)
+        train_array = raw.values.astype(np.float32)  # 32-dim input for compatibility
+
 
         train_model(
             model,
