@@ -23,11 +23,16 @@ class PredictionModel(nn.Module):
     def __init__(self):
         super().__init__()
 
+
+        self.rm_buffer = []
+        self.rm_sum = None
+
         self.dim = None
         self.input_dim = 64
         self.output_dim = 32
         self.hidden_size = 256
         self.num_layers = 2
+        self.seq_len = 96
 
         self.current_seq_ix = None
         self.sequence_history = []
@@ -85,6 +90,7 @@ class PredictionModel(nn.Module):
         rm5 = pd.DataFrame(seq).rolling(window=5, min_periods=1).mean().to_numpy()
         inp = np.concatenate([seq, rm5], axis=1)         # (seq_len, 64)
         x = torch.tensor(inp, dtype=torch.float32).unsqueeze(0).to(DEVICE)
+        
 
 
         # Run through the model
@@ -197,4 +203,4 @@ if __name__ == "__main__":
     print("to test the solution submission mechanism!")
     print("=" * 60)
 
-    
+
