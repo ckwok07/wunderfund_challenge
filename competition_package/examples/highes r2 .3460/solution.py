@@ -115,7 +115,7 @@ def make_sequences(data: np.ndarray, seq_len: int = 32):
     X, y = [], []
     for i in range(len(data) - seq_len):
         X.append(data[i:i+seq_len])      # window
-        y.append(data[i+seq_len])        # next step
+        y.append(data[i+seq_len, :32])        # next step
     X = np.stack(X, axis=0)  # (num_samples, seq_len, dim)
     y = np.stack(y, axis=0)  # (num_samples, dim)
     return X, y
