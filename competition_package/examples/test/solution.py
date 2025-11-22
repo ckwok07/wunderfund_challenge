@@ -109,7 +109,7 @@ def make_sequences(data: np.ndarray, seq_len: int = 32):
 def train_model(
     model: PredictionModel,
     train_array: np.ndarray,
-    num_epochs: int = 3,
+    num_epochs: int = 8,
     seq_len: int = 32,
     lr: float = 1e-3,
     batch_size: int = 64,
@@ -166,7 +166,7 @@ if __name__ == "__main__":
     train_model(
         model,
         train_array=train_array,
-        num_epochs=3,
+        num_epochs=12,
         lr=1e-3,
         batch_size=64,
     )

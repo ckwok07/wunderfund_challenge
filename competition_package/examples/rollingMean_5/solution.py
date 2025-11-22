@@ -23,6 +23,7 @@ class PredictionModel(nn.Module):
     def __init__(self):
         super().__init__()
 
+        self.dim = None
         self.input_dim = 64
         self.output_dim = 32
         self.hidden_size = 64
@@ -41,9 +42,6 @@ class PredictionModel(nn.Module):
 
         # Fully-connected layer that maps hidden state → prediction
         self.fc = nn.Linear(self.hidden_size, self.output_dim)
-
-        self.current_seq_ix = None
-        self.sequence_history = []
 
         weights_path = os.path.join(CURRENT_DIR, "lstm_weights.pt")
         if os.path.exists(weights_path):
@@ -68,8 +66,6 @@ class PredictionModel(nn.Module):
     def predict(self, dp: DataPoint):
         if self.dim is None:
             self.dim = dp.state.shape[0]
-            self.lstm = nn.LSTM(input_size=self.dim, hidden_size=self.hidden_size, num_layers=self.num_layers, batch_first=True)
-            self.fc = nn.Linear(self.hidden_size, self.dim)
 
         # Reset history when a new sequence starts
         if self.current_seq_ix != dp.seq_ix:
@@ -173,7 +169,7 @@ if __name__ == "__main__":
     train_model(
         model,
         train_array=train_array,
-        num_epochs=3,
+        num_epochs=12,
         lr=1e-3,
         batch_size=64,
     )
