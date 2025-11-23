@@ -33,7 +33,7 @@ class PredictionModel(nn.Module):
         self.sequence_history = []  # list of delta vectors
         self.last_state = None      # last raw state seen
 
-        # LSTM layer
+        # LSTM layer: takes 32-dim deltas as input
         self.lstm = nn.LSTM(
             input_size=self.dim,
             hidden_size=self.hidden_size,
@@ -44,12 +44,22 @@ class PredictionModel(nn.Module):
         # Fully-connected layer that maps hidden state → delta prediction
         self.fc = nn.Linear(self.hidden_size, self.dim)
 
-        # If we have previously trained weights, load them
+        # Paths for weights and bias
         weights_path = os.path.join(CURRENT_DIR, "lstm_weights.pt")
+        bias_path = os.path.join(CURRENT_DIR, "delta_bias.npy")
+
+        # Load weights if we have them
         if os.path.exists(weights_path):
             print(f"Loading weights from {weights_path}")
             state_dict = torch.load(weights_path, map_location=DEVICE)
             self.load_state_dict(state_dict)
+
+        # Load bias correction if we have it
+        if os.path.exists(bias_path):
+            print(f"Loading bias from {bias_path}")
+            self.bias = np.load(bias_path).astype(np.float32)
+        else:
+            self.bias = None
 
         self.to(DEVICE)
 
@@ -58,14 +68,8 @@ class PredictionModel(nn.Module):
         x shape: (batch_size, seq_len, dim) of delta values
         returns: (batch_size, dim) predicted delta at next step
         """
-        batch_size = x.size(0)
-        device = x.device
-
-        h0 = torch.zeros(self.num_layers, batch_size, self.hidden_size, device=device)
-        c0 = torch.zeros(self.num_layers, batch_size, self.hidden_size, device=device)
-
-        out, _ = self.lstm(x, (h0, c0))      # (batch_size, seq_len, hidden_size)
-        out = self.fc(out[:, -1, :])         # (batch_size, dim)
+        out, _ = self.lstm(x)       # (batch_size, seq_len, hidden_size)
+        out = self.fc(out[:, -1, :])  # (batch_size, dim)
         return out
 
     def _reset_sequence_state(self, seq_ix: int):
@@ -116,6 +120,10 @@ class PredictionModel(nn.Module):
         # Model predicts the next delta
         delta_pred = self.forward(x)  # (1, dim)
         delta_pred_np = delta_pred.detach().cpu().numpy().reshape(-1)
+
+        # Apply learned bias correction if available (remove systematic overshoot)
+        if self.bias is not None:
+            delta_pred_np = delta_pred_np - self.bias
 
         # Convert predicted delta back to raw prediction: x_{t+1} = x_t + Δ
         raw_pred = raw_state + delta_pred_np
@@ -179,50 +187,79 @@ def train_model(
         epoch_loss /= len(dataset)
         print(f"Epoch {epoch+1}/{num_epochs} - loss: {epoch_loss:.6f}")
 
+    # Compute and save bias after training
+    model.eval()
+    with torch.no_grad():
+        preds_all = []
+        trues_all = []
+        for xb, yb in loader:
+            xb = xb.to(DEVICE)
+            yb = yb.to(DEVICE)
+            p = model(xb).cpu().numpy()
+            t = yb.cpu().numpy()
+            preds_all.append(p)
+            trues_all.append(t)
+        preds_all = np.concatenate(preds_all, axis=0)
+        trues_all = np.concatenate(trues_all, axis=0)
+        bias = (preds_all - trues_all).mean(axis=0)  # (32,)
+        bias_path = os.path.join(CURRENT_DIR, "delta_bias.npy")
+        np.save(bias_path, bias)
+        print("Saved bias correction vector to", bias_path)
 
 if __name__ == "__main__":
-    # Path to train parquet
-    test_file = f"{CURRENT_DIR}/../../datasets/train.parquet"
 
-    # Load data into scorer
+    test_file = f"{CURRENT_DIR}/../../datasets/train.parquet"
     scorer = ScorerStepByStep(test_file)
 
-    # Create model
-    model = PredictionModel()
-
-    print("Training LSTM on DELTAS (changes in variables) ...")
-    print(f"Feature dimensionality: {scorer.dim}")
-    print(f"Number of rows in dataset: {len(scorer.dataset)}")
+    weights_path = os.path.join(CURRENT_DIR, "lstm_weights.pt")
 
     df = scorer.dataset
-    features = scorer.features  # should be the 32 raw variables
+    features = scorer.features
 
-    # Build delta array per sequence, then stack
+    # Build delta array
     all_deltas = []
     for seq_ix, df_seq in df.groupby("seq_ix"):
         seq_vals = df_seq[features].values.astype(np.float32)
         if len(seq_vals) < 2:
             continue
-        delta = np.diff(seq_vals, axis=0)  # shape (T-1, 32)
+        delta = np.diff(seq_vals, axis=0)
         all_deltas.append(delta)
 
-    train_delta = np.concatenate(all_deltas, axis=0)  # (N_total-#seq, 32)
-    print(f"Total delta rows for training: {train_delta.shape[0]}")
+    train_delta = np.concatenate(all_deltas, axis=0)
+    print("Training data shape (deltas):", train_delta.shape)
 
-    # Train on deltas
-    train_model(
-        model,
-        train_array=train_delta,
-        num_epochs=3,
-        lr=1e-3,
-        batch_size=64,
-    )
+    #
+    # ─────────────────────────────────────────────
+    #  IF WEIGHTS EXIST → SKIP TRAINING, ONLY SCORE
+    # ─────────────────────────────────────────────
+    #
+    if os.path.exists(weights_path):
+        print("⚡ Found weights — skipping training and going straight to scoring.")
+        model = PredictionModel()  # loads weights automatically
+    else:
+        #
+        # ─────────────────────────────────────────────
+        #  NO WEIGHTS → TRAIN, SAVE, THEN SCORE
+        # ─────────────────────────────────────────────
+        #
+        print("🚀 No weights found — training model to create them.")
+        model = PredictionModel()
+        train_model(
+            model,
+            train_array=train_delta,
+            num_epochs=3,
+            lr=1e-3,
+            batch_size=64,
+        )
+        torch.save(model.state_dict(), weights_path)
+        print("💾 Saved weights to", weights_path)
+        model = PredictionModel()  # reload freshly saved weights
 
-    # Save trained weights to file in the same folder as solution.py
-    torch.save(model.state_dict(), os.path.join(CURRENT_DIR, "lstm_weights.pt"))
-    print("Saved weights to lstm_weights.pt")
-
-    # Evaluate our solution using scorer's online interface
+    #
+    # ─────────────────────────────────────────────
+    #  ALWAYS SCORE AFTER THIS POINT
+    # ─────────────────────────────────────────────
+    #
     model.eval()
     results = scorer.score(model)
 
@@ -234,8 +271,6 @@ if __name__ == "__main__":
         print(f"  {feature}: {results[feature]:.6f}")
 
     print(f"\nTotal features: {len(scorer.features)}")
-
     print("\n" + "=" * 60)
-    print("Try submitting an archive with solution.py file")
-    print("to test the solution submission mechanism!")
+    print("Done.")
     print("=" * 60)
